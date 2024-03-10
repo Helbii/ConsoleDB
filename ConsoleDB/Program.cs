@@ -2,6 +2,9 @@
 
 using System;
 using ConsoleDB;
+using System.Diagnostics;
+using System.Threading.Tasks;
+using Neo4j.Driver;
 
 class Program
 {
@@ -42,8 +45,187 @@ class Program
 
     static void UtiliserBaseDeDonneesNoSQL()
     {
+        var uri = "bolt://localhost:7687";
+        var username = "neo4j";
+        var password = "luca";
 
+        using var driver = GraphDatabase.Driver(uri, AuthTokens.Basic(username, password));
+        await using var session = driver.AsyncSession(o => o.WithDatabase("neo4j"));
+
+        Console.Clear();
+        Console.WriteLine("Veuillez choisir une requete :");
+        Console.WriteLine("1. Injecter des users");
+        Console.WriteLine("2. Injecter des produits");
+        Console.WriteLine("3. Quitter");
+        
+        int choix;
+        if (!int.TryParse(Console.ReadLine(), out choix))
+        {
+            Console.WriteLine("Veuillez entrer un numéro valide.");
+            return;
+        }
+
+        switch (choix)
+        {
+            case 1:
+                Console.Clear();
+                Console.WriteLine("Combien de users ?");
+                int nombreUser = int.Parse(Console.ReadLine());
+                await InjecterUsersDansBaseDeDonnees(session, nombreUser);
+                break;
+            case 2:
+                Console.Clear();
+                Console.WriteLine("Combien de produits ?");
+                int nombreProduits = int.Parse(Console.ReadLine());
+                await CreerProduits(session, nombreProduits);
+                break;
+            case 3:
+                
+                break;
+            default:
+                throw new InvalidOperationException("Choix invalide.");
+        }
+
+        Console.WriteLine($"Fini");
     }
+
+    static async Task InjecterUsersDansBaseDeDonnees(IAsyncSession session, int nombreUtilisateur)
+    {
+        Console.WriteLine($"Vous avez choisi d'injecter {nombreUtilisateur} utilisateurs.");
+    
+        Stopwatch sw = new Stopwatch();
+        sw.Start();
+
+        var query = @"
+        CREATE (n:User {id: $id, nom: $nom, prenom: $prenom})
+        RETURN n
+        ";
+
+        var utilisateursCrees = new List<string>();
+    
+        for (int i = 0; i < nombreUtilisateur; i++)
+        {
+            var idUtilisateur = Guid.NewGuid().ToString(); 
+            var nomUtilisateur = GenerateData.GenererNomPrenomAleatoire();
+            var prenomUtilisateur = GenerateData.GenererNomPrenomAleatoire();
+            var parameters = new { id = idUtilisateur, nom = nomUtilisateur, prenom = prenomUtilisateur };
+        
+            await session.WriteTransactionAsync(async transaction =>
+            {
+                var cursor = await transaction.RunAsync(query, parameters);
+                var result = await cursor.SingleAsync();
+                var createdNode = result["n"].As<INode>();
+                //Console.WriteLine($"Utilisateur créé avec l'ID: {createdNode["id"].As<string>()}");
+                utilisateursCrees.Add(createdNode["id"].As<string>());
+            });
+        }
+
+        //Console.WriteLine($"Utilisateurs créés : {string.Join(", ", utilisateursCrees)}");
+        await AjouterAbonnements(session, utilisateursCrees);
+        await AjouterAchats(session, utilisateursCrees);
+
+        sw.Stop();
+        Console.WriteLine($"Temps d'exécution : {sw.ElapsedMilliseconds} ms");
+    }
+
+    static async Task AjouterAbonnements(IAsyncSession session, List<string> idsUtilisateurs)
+    {
+        var query = @"
+        MATCH (u1:User {id: $id1}), (u2:User {id: $id2})
+        CREATE (u1)-[:ABONNEMENT]->(u2)
+        ";
+
+        foreach (var idUtilisateur in idsUtilisateurs)
+        {
+            var nombreAbonnements = new Random().Next(0, 21); 
+
+            for (int i = 0; i < nombreAbonnements; i++)
+            {
+                var utilisateurAbonnement = idsUtilisateurs[new Random().Next(idsUtilisateurs.Count)]; // Choix aléatoire d'un utilisateur existant comme abonnement
+                if (utilisateurAbonnement != idUtilisateur) // S'assurer que l'utilisateur ne s'abonne pas à lui-même
+                {
+                    await session.WriteTransactionAsync(async transaction =>
+                    {
+                        await transaction.RunAsync(query, new { id1 = idUtilisateur, id2 = utilisateurAbonnement });
+                    });
+
+                    //Console.WriteLine($"Utilisateur avec l'ID: {idUtilisateur} s'est abonné à l'utilisateur avec l'ID: {utilisateurAbonnement}");
+                }
+            }
+        }
+    }
+    
+    static async Task CreerProduits(IAsyncSession session, int nombreProduits)
+    {
+        Console.WriteLine($"Vous avez choisi de créer {nombreProduits} produits.");
+
+        Stopwatch sw = new Stopwatch();
+        sw.Start();
+
+        var query = @"
+            CREATE (p:Produit {id: $id, nom: $nom, prix: $prix})
+            RETURN p
+        ";
+
+        var produitsCrees = new List<string>();
+
+        for (int i = 0; i < nombreProduits; i++)
+        {
+            var idProduit = Guid.NewGuid().ToString();
+            var nomProduit = GenerateData.GenererNomProduitAleatoire();
+            var prixProduit = GenerateData.GenererPrixAleatoire();
+            var parameters = new { id = idProduit, nom = nomProduit, prix = prixProduit };
+
+            await session.WriteTransactionAsync(async transaction =>
+            {
+                var cursor = await transaction.RunAsync(query, parameters);
+                var result = await cursor.SingleAsync();
+                var createdNode = result["p"].As<INode>();
+                //Console.WriteLine($"Produit créé avec le nom: {createdNode["nom"].As<string>()} et le prix: {createdNode["prix"].As<double>()}");
+                produitsCrees.Add(createdNode["nom"].As<string>());
+            });
+        }
+
+        sw.Stop();
+        Console.WriteLine($"Temps d'exécution : {sw.ElapsedMilliseconds} ms");
+
+        //Console.WriteLine($"Produits créés : {string.Join(", ", produitsCrees)}");
+    }
+    
+    static async Task AjouterAchats(IAsyncSession session, List<string> idsUtilisateurs)
+    {
+        var query = @"
+        MATCH (u:User {id: $userId}), (p:Produit {id: $produitId})
+        CREATE (u)-[:ACHAT]->(p)
+        ";
+
+        var produits = await session.ReadTransactionAsync(async transaction =>
+        {
+            var result = await transaction.RunAsync("MATCH (p:Produit) RETURN p.id AS produitId");
+            return await result.ToListAsync();
+        });
+
+        var produitIds = produits.Select(p => p["produitId"].As<string>()).ToList();
+        
+        foreach (var idUtilisateur in idsUtilisateurs)
+        {
+            var nombreAchats = new Random().Next(0, 6);
+            
+            for (int i = 0; i < nombreAchats; i++)
+            {
+                var produitId = produitIds[new Random().Next(produitIds.Count)];
+
+                await session.WriteTransactionAsync(async transaction =>
+                {
+                    await transaction.RunAsync(query, new { userId = idUtilisateur, produitId });
+                });
+
+                //Console.WriteLine($"L'utilisateur avec l'ID: {idUtilisateur} a acheté le produit avec l'ID: {produitId}");
+            }
+
+        }
+    }
+// -----------------------------------------------------------------------------------------------
 
     static void UtiliserSGBDR()
     {
